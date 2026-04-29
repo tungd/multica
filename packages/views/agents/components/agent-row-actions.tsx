@@ -140,7 +140,10 @@ export function AgentRowActions({
               variant="ghost"
               size="icon-sm"
               aria-label="Row actions"
-              onClick={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
               onKeyDown={(e) => e.stopPropagation()}
             />
           }

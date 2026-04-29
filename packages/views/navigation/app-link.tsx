@@ -12,6 +12,7 @@ export const AppLink = forwardRef<HTMLAnchorElement, AppLinkProps>(
     const { push, openInNewTab } = useNavigation();
 
     const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+      if (e.defaultPrevented) return;
       if (e.metaKey || e.ctrlKey || e.shiftKey) {
         if (openInNewTab) {
           e.preventDefault();
@@ -19,8 +20,9 @@ export const AppLink = forwardRef<HTMLAnchorElement, AppLinkProps>(
         }
         return;
       }
-      e.preventDefault();
       onClick?.(e);
+      if (e.defaultPrevented) return;
+      e.preventDefault();
       push(href);
     };
 
