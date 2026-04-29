@@ -128,7 +128,7 @@ func TestClaudeHandleControlRequestAutoApproves(t *testing.T) {
 		Type:      "control_request",
 		RequestID: "req-42",
 		Request: mustMarshal(t, claudeControlRequestPayload{
-			Subtype:  "tool_use",
+			Subtype:  "can_use_tool",
 			ToolName: "Bash",
 			Input:    mustMarshal(t, map[string]any{"command": "ls"}),
 		}),
@@ -151,6 +151,27 @@ func TestClaudeHandleControlRequestAutoApproves(t *testing.T) {
 	innerResp := respInner["response"].(map[string]any)
 	if innerResp["behavior"] != "allow" {
 		t.Fatalf("expected behavior allow, got %v", innerResp["behavior"])
+	}
+}
+
+func TestClaudeHandleControlRequestIgnoresUnknownSubtype(t *testing.T) {
+	t.Parallel()
+
+	b := &claudeBackend{cfg: Config{Logger: slog.Default()}}
+	var written bytes.Buffer
+
+	msg := claudeSDKMessage{
+		Type:      "control_request",
+		RequestID: "req-99",
+		Request: mustMarshal(t, claudeControlRequestPayload{
+			Subtype: "hook_callback",
+		}),
+	}
+
+	b.handleControlRequest(msg, &written)
+
+	if written.Len() != 0 {
+		t.Fatalf("expected no response for non-can_use_tool subtype, got %q", written.String())
 	}
 }
 
@@ -212,6 +233,7 @@ func TestBuildClaudeArgsIncludesStrictMCPConfig(t *testing.T) {
 		"--dangerously-skip-permissions",
 		"--allowedTools", "Bash(*)",
 		"--permission-mode", "bypassPermissions",
+		"--permission-prompt-tool", "stdio",
 	}
 
 	if len(args) != len(expected) {
@@ -552,7 +574,7 @@ func TestClaudeExecuteSurfacesStderrWhenChildExitsEarly(t *testing.T) {
 	// Result.Error would be a useless "exit status 3".
 	fakePath := filepath.Join(t.TempDir(), "claude")
 	script := "#!/bin/sh\n" +
-		"cat >/dev/null\n" +
+		"IFS= read -r prompt || exit 2\n" +
 		"echo \"FATAL ERROR: V8 abort: assertion failed\" >&2\n" +
 		"exit 3\n"
 	writeTestExecutable(t, fakePath, []byte(script))
@@ -590,6 +612,55 @@ func TestClaudeExecuteSurfacesStderrWhenChildExitsEarly(t *testing.T) {
 		}
 		if !strings.Contains(result.Error, "claude stderr:") {
 			t.Fatalf("expected stderr label in error, got %q", result.Error)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for result")
+	}
+}
+
+func TestClaudeExecuteRespondsToControlRequest(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+
+	fakePath := filepath.Join(t.TempDir(), "claude")
+	script := "#!/bin/sh\n" +
+		"IFS= read -r prompt || exit 2\n" +
+		"echo '{\"type\":\"control_request\",\"request_id\":\"req-42\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Bash\",\"input\":{\"command\":\"multica issue get issue-1 --output json\"}}}'\n" +
+		"IFS= read -r response || exit 3\n" +
+		"case \"$response\" in *'\"type\":\"control_response\"'*) ;; *) echo \"missing control response type: $response\" >&2; exit 4 ;; esac\n" +
+		"case \"$response\" in *'\"request_id\":\"req-42\"'*) ;; *) echo \"missing request id: $response\" >&2; exit 4 ;; esac\n" +
+		"case \"$response\" in *'\"behavior\":\"allow\"'*) ;; *) echo \"missing allow behavior: $response\" >&2; exit 4 ;; esac\n" +
+		"echo '{\"type\":\"result\",\"session_id\":\"sess-1\",\"result\":\"done\",\"is_error\":false}'\n"
+	writeTestExecutable(t, fakePath, []byte(script))
+
+	backend, err := New("claude", Config{ExecutablePath: fakePath, Logger: slog.Default()})
+	if err != nil {
+		t.Fatalf("new claude backend: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	session, err := backend.Execute(ctx, "prompt", ExecOptions{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	go func() {
+		for range session.Messages {
+		}
+	}()
+
+	select {
+	case result, ok := <-session.Result:
+		if !ok {
+			t.Fatal("result channel closed without a value")
+		}
+		if result.Status != "completed" {
+			t.Fatalf("expected status=completed, got %q (error=%q)", result.Status, result.Error)
+		}
+		if result.Output != "done" {
+			t.Fatalf("expected output done, got %q", result.Output)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout waiting for result")

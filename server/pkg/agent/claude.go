@@ -109,7 +109,6 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		_ = cmd.Wait()
 		return nil, errors.New(withAgentStderr(fmt.Sprintf("write claude input: %v", err), "claude", stderrBuf.Tail()))
 	}
-	closeStdin()
 
 	b.cfg.Logger.Info("claude started", "pid", cmd.Process.Pid, "cwd", opts.Cwd, "model", opts.Model)
 
@@ -121,6 +120,7 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 
 	go func() {
 		defer cancel()
+		defer closeStdin()
 		defer close(msgCh)
 		defer close(resCh)
 		if mcpConfigPath != "" {
@@ -183,6 +183,8 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 						Content: msg.Log.Message,
 					})
 				}
+			case "control_request":
+				b.handleControlRequest(msg, stdin)
 			}
 		}
 
@@ -297,9 +299,15 @@ func (b *claudeBackend) handleUser(msg claudeSDKMessage, ch chan<- Message) {
 }
 
 func (b *claudeBackend) handleControlRequest(msg claudeSDKMessage, stdin interface{ Write([]byte) (int, error) }) {
-	// Auto-approve all tool uses in autonomous/daemon mode.
 	var req claudeControlRequestPayload
 	if err := json.Unmarshal(msg.Request, &req); err != nil {
+		return
+	}
+	// Only `can_use_tool` arrives on this channel under our flag set
+	// (--permission-prompt-tool stdio without hooks/MCP/elicitation init).
+	// Ignore anything else so a future protocol addition can't get a bogus
+	// PermissionResult-shaped reply.
+	if req.Subtype != "can_use_tool" {
 		return
 	}
 
@@ -406,13 +414,14 @@ func trySend(ch chan<- Message, msg Message) {
 // overridden by user-configured custom_args. Overriding these would break
 // the daemon↔Claude communication protocol.
 var claudeBlockedArgs = map[string]blockedArgMode{
-	"-p":                blockedStandalone, // non-interactive mode
-	"--output-format":   blockedWithValue,  // stream-json protocol
-	"--input-format":    blockedWithValue,  // stream-json protocol
-	"--allowedTools":    blockedWithValue,  // all tools allowed for autonomous operation
-	"--allowed-tools":   blockedWithValue,  // alias of --allowedTools
-	"--permission-mode": blockedWithValue,  // bypassPermissions for autonomous operation
-	"--mcp-config":      blockedWithValue,  // set by daemon from agent.mcp_config
+	"-p":                       blockedStandalone, // non-interactive mode
+	"--output-format":          blockedWithValue,  // stream-json protocol
+	"--input-format":           blockedWithValue,  // stream-json protocol
+	"--allowedTools":           blockedWithValue,  // all tools allowed for autonomous operation
+	"--allowed-tools":          blockedWithValue,  // alias of --allowedTools
+	"--permission-mode":        blockedWithValue,  // bypassPermissions for autonomous operation
+	"--permission-prompt-tool": blockedWithValue,  // stdio — daemon answers can_use_tool over the same pipe
+	"--mcp-config":             blockedWithValue,  // set by daemon from agent.mcp_config
 }
 
 func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
@@ -425,6 +434,14 @@ func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
 		"--dangerously-skip-permissions",
 		"--allowedTools", "Bash(*)",
 		"--permission-mode", "bypassPermissions",
+		// Without --permission-prompt-tool, claude 2.1 internally denies
+		// unknown binaries (anything not on its built-in safe list, e.g.
+		// `multica` or absolute paths) regardless of --allowedTools or
+		// --dangerously-skip-permissions, returning the literal tool result
+		// "This command requires approval". Setting it to "stdio" routes
+		// permission decisions to the daemon as `can_use_tool` control_request
+		// messages on stdout, which handleControlRequest auto-approves.
+		"--permission-prompt-tool", "stdio",
 	}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
