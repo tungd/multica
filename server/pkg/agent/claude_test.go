@@ -210,7 +210,7 @@ func TestBuildClaudeArgsIncludesStrictMCPConfig(t *testing.T) {
 		"--verbose",
 		"--strict-mcp-config",
 		"--dangerously-skip-permissions",
-		"--allowedTools", "*",
+		"--allowedTools", "Bash(*)",
 		"--permission-mode", "bypassPermissions",
 	}
 

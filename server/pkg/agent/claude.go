@@ -423,7 +423,7 @@ func buildClaudeArgs(opts ExecOptions, logger *slog.Logger) []string {
 		"--verbose",
 		"--strict-mcp-config",
 		"--dangerously-skip-permissions",
-		"--allowedTools", "*",
+		"--allowedTools", "Bash(*)",
 		"--permission-mode", "bypassPermissions",
 	}
 	if opts.Model != "" {
